@@ -43,7 +43,6 @@ class FedLMCServer(BaseServer):
         Executes the server-side operations. This method aggregates model updates from the
         clients by computing a weighted average of the model parameters.
         """
-        # 计算全局模型参数
         with torch.no_grad():
             num_tot_samples = sum([self.message_pool[f"client_{client_id}"]["num_samples"] for client_id in
                                    self.message_pool[f"sampled_clients"]])
