@@ -91,49 +91,35 @@ class FedLMClient(BaseClient):
         self.task.model.local_compensation.train()
         self.task.model.border_gen.train()
         for _ in range(self.args.num_epochs):
-            # 训练生成器
             self.optim1.zero_grad()
             self.optim2.zero_grad()
             border_node = self.task.model.border_gen()
             embedding, logits = self.task.model.local_compensation.forward(data["data"].x,
                                                                            data["data"].edge_index, border_node)
-            # 交叉熵损失
             loss_cross = torch.nn.functional.cross_entropy(logits[class_mask], class_label[class_mask])
 
-            # 社区锚点损失
             embedding_true = embedding.detach()
-            # 社区锚点embedding
             border_embedding = self.task.model.local_compensation.border_embedding  # num_node*hid_dim
-            # 生成社区原型
             subgraph_embedding = torch.mm(border_adj, embedding_true)  # num_node*hid_dim
-            # 归一化
             border_embedding = F.normalize(border_embedding, dim=1)
             subgraph_embedding = F.normalize(subgraph_embedding, dim=1)
 
-            # 计算相似性矩阵 (num_border, num_border)，每个边界节点的嵌入与所有边界节点的嵌入之间的相似性
             similarity_matrix = torch.matmul(border_embedding, border_embedding.T)
 
-            # 计算正样本相似性 (num_border,)，计算边界节点和子图embedding的cos相似性
             positive_similarity = torch.sum(border_embedding * subgraph_embedding,
                                             dim=1)
 
-            # 将正样本相似性扩展为 (num_border, 1)，以便与相似性矩阵广播
             positive_similarity = positive_similarity[:, None]
 
-            # 归一化相似性矩阵，将相似性除以温度参数 tau
             similarity_matrix = similarity_matrix / self.temperature
             positive_similarity = positive_similarity / self.temperature
-            # 计算 InfoNCE Loss，对每个边界节点，计算负对数似然
-            exp_similarity = torch.exp(similarity_matrix)  # 对所有相似性取指数
-            exp_positive_similarity = torch.exp(positive_similarity)  # 对正样本相似性取指数
-            mask = ~torch.eye(exp_similarity.size(0), device=self.device).bool()  # 生成指示对角线元素的mask
-            # 计算分母 (num_border,)
-            denominator = torch.sum(exp_similarity * mask, dim=1, keepdim=True)  # 分母是所有边界节点的相似性之和，排除对角线元素
-            # 计算对比损失 (num_border,)
+            exp_similarity = torch.exp(similarity_matrix) 
+            exp_positive_similarity = torch.exp(positive_similarity) 
+            mask = ~torch.eye(exp_similarity.size(0), device=self.device).bool()  
+            denominator = torch.sum(exp_similarity * mask, dim=1, keepdim=True) 
             loss_con = -torch.log(exp_positive_similarity / denominator)
-            #loss_con = -exp_similarity  # 对齐损失
-            #loss_con = torch.log(denominator) # 区分损失
-            # 对所有边界节点的损失求平均
+            #loss_con = -exp_similarity  
+            #loss_con = torch.log(denominator) 
             loss_con = torch.mean(loss_con)
             loss = loss_cross + loss_con * self.config['loss_con']
             loss.backward()
@@ -141,74 +127,52 @@ class FedLMClient(BaseClient):
             self.optim2.step()
 
     def border_mask(self, border_subgraph_map):
-        # 创建真实节点和边界节点的mask矩阵num_nude*num_border
         num_nodes = self.task.processed_data['data'].x.shape[0]
         num_border = len(border_subgraph_map)
         node_border_mask = torch.zeros((num_nodes, num_border), dtype=torch.float, device=self.device)
 
-        # 遍历边界节点及其对应的子图节点
         for border_idx, (border_node_id, subgraph_node_ids) in enumerate(border_subgraph_map.items()):
-            # 在 node_border_mask 中标记子图节点与边界节点的连接为 1
             node_border_mask[subgraph_node_ids, border_idx] = 1.0
         return node_border_mask
 
     def divide_subgraph(self, len_max=10):
-        """
-        将客户端的子图划分为多个小子图，并合并孤立子图使最终子图数量不超过 len_max。
 
-        参数:
-        len_max: 最终划分的子图最大数量
-
-        返回:
-        partition_groups: 字典，键是社区ID，值是该社区中的所有节点ID
-        """
-        # 使用 Louvain 算法进行社区划分
         louvain = Louvain(modularity='newman', resolution=1.0, return_aggregate=True)
         num_nodes = self.task.processed_data['data'].x.shape[0]
         adj_csr = to_scipy_sparse_matrix(self.task.processed_data['data'].edge_index)
         fit_result = louvain.fit_predict(adj_csr)
 
-        # 创建 partition：字典，键是节点ID，值是社区ID
         partition = {}
         for node_id, com_id in enumerate(fit_result):
             partition[node_id] = int(com_id)
 
-        # 获取所有社区ID
         groups = list(set(partition.values()))
 
-        # 创建 partition_groups：字典，键是社区ID，值是该社区中的所有节点ID
         partition_groups = {group_id: [] for group_id in groups}
         for node_id, com_id in partition.items():
             partition_groups[com_id].append(node_id)
 
-        # 将所有社区按照大小进行排序
         len_dict = {group_id: len(node_ids) for group_id, node_ids in partition_groups.items()}
         sorted_len_dict = sorted(len_dict.items(), key=lambda item: item[1], reverse=True)
 
-        # 合并孤立子图（节点数少的社区）
         merged_partition_groups = {}
-        small_groups = []  # 存储需要合并的小社区
+        small_groups = []  
         for group_id, group_size in sorted_len_dict:
-            if group_size < 3:  # 这里可以调整阈值，比如小于5个节点的社区需要合并
+            if group_size < 3:  
                 small_groups.append(group_id)
             else:
                 merged_partition_groups[group_id] = partition_groups[group_id]
 
-        # 将小社区合并到一个大社区
         if small_groups:
             merged_partition_groups['merged_small'] = []
             for group_id in small_groups:
                 merged_partition_groups['merged_small'].extend(partition_groups[group_id])
 
-        # 如果合并后社区数量仍然超过 len_max，则继续合并
         while len(merged_partition_groups) > len_max:
-            # 按社区大小排序
             sorted_groups = sorted(merged_partition_groups.items(), key=lambda item: len(item[1]), reverse=True)
-            # 合并最后两个社区
             smallest_group_id, smallest_group_nodes = sorted_groups[-1]
             second_smallest_group_id, second_smallest_group_nodes = sorted_groups[-2]
 
-            # 合并
             merged_partition_groups[second_smallest_group_id].extend(smallest_group_nodes)
             del merged_partition_groups[smallest_group_id]
 
