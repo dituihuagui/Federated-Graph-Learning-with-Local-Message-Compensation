@@ -23,3 +23,4 @@ times=1
 for i in range(times):
     trainer = FGLTrainer(args)
     trainer.train()
+#python main.py --gpuid 5 hid_dim 64 --num_layers 2 --dataset "Cora" --train_val_test "0.2-0.4-0.4" --num_epochs 3 --num_rounds 100 --lr 0.01 --fl_algorithm "FedLMC" --num_clients 10
