@@ -74,18 +74,10 @@ class BorderGCN(nn.Module):
             layer.reset_parameters()
 
     def norm_weight(self, adj, weight_score):
-        # 对传给真实节点的边进行归一化
         node_degree = torch.sum(adj, dim=1)  # 形状: (num_node,)
-
-        # 防止度为 0 的节点引发除零错误，添加一个小值
         node_degree = torch.clamp(node_degree, min=1e-12)  # 形状: (num_node,)
-
-        # 扩展节点度以匹配 weight_score 的形状
         node_degree_expanded = node_degree[:, None]  # 形状: (num_node, 1)
-
-        # 对权重矩阵进行归一化
         normalized_TN = weight_score / node_degree_expanded  # 形状: (num_node, num_border)
-        # 对传给边界节点的边进行归一化
         weight_score_T = weight_score.T
         node_degree = torch.sum(weight_score_T, dim=1)
 
@@ -103,20 +95,13 @@ class BorderGCN(nn.Module):
             edge_index, edge_attr = dense_to_coo(edge_index)
 
         for i, layer in enumerate(self.layers[:-1]):
-            #第一阶段补偿
             x = layer(x, edge_index, edge_attr)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-            #第二阶段补偿
             if border_node is not None and weight_border is not None:
-                # 计算边界embedding
                 border_embedding = self.border_encoder[i](border_embedding)
-                # 计算来自邻域节点的传递消息
                 message_fromBN = torch.mm(weight_border_TN, border_embedding)
-
-                # 计算来自真实节点的传递消息
                 message_fromTN = torch.mm(weight_border_BN, x)
-                # 将消息从边界节点传递给真实节点
                 x = x + message_fromBN
                 border_embedding = border_embedding + message_fromTN
                 border_embedding = F.dropout(border_embedding, p=self.dropout, training=self.training)
@@ -156,55 +141,4 @@ class GraphSage(nn.Module):
         return x, logits
 
 
-class SAGEConvPlus(SAGEConv):
-    def __init__(
-            self,
-            in_channels: Union[int, Tuple[int, int]],
-            out_channels: int,
-            aggr: str = "mean",
-            normalize: bool = False,
-            root_weight: bool = True,
-            bias: bool = True,
-            **kwargs
-    ):
-        super(SAGEConvPlus, self).__init__(
-            in_channels, out_channels, aggr, normalize, root_weight, bias, **kwargs
-        )
 
-    def forward(
-            self,
-            x: Union[Tensor, OptPairTensor],
-            edge_index: Adj,
-            edge_weight: OptTensor = None,
-            size: Size = None,
-    ) -> Tensor:
-        # 如果 x 是张量，将其转换为 (x_src, x_dst) 的形式
-        if isinstance(x, Tensor):
-            x: OptPairTensor = (x, x)
-
-        # 如果需要投影，则应用线性变换
-        if self.project and hasattr(self, 'lin'):
-            x = (self.lin(x[0]).relu(), x[1])
-
-        # 将 edge_weight 存储为类的属性，供 message 方法使用
-        self._edge_weight = edge_weight
-
-        # 调用 propagate 方法
-        out = self.propagate(edge_index, x=x, size=size)
-        out = self.lin_l(out)
-
-        # 处理根节点特征
-        x_r = x[1]
-        if self.root_weight and x_r is not None:
-            out = out + self.lin_r(x_r)
-
-        # 如果需要，归一化输出
-        if self.normalize:
-            out = F.normalize(out, p=2., dim=-1)
-
-        return out
-
-    def message(self, x_j: Tensor) -> Tensor:
-        # 使用类属性 _edge_weight 处理边权重
-        edge_weight = self._edge_weight
-        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
