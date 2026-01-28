@@ -9,19 +9,15 @@ class NodeGen(nn.Module):
     def __init__(self, input_dim, hid_dim, feat_shape, num_layers_encoder=2, num_layers_decoder=2,
                  dropout=0.5):
         super(NodeGen, self).__init__()
-        # input_dim：即embed_dim：随机生成的节点嵌入维度
-        # hid_dim：即hid_dim_node，节点特征生成器隐藏层维度
-        # feat_shape：节点原始特征维度
+
         self.input_dim = input_dim
         self.hid_dim = hid_dim
         self.feat_shape = feat_shape
         self.encoder = nn.ModuleList()
         self.test_emb = nn.Parameter(torch.empty(3, 3))
-        # 编码器
         self.encoder.append(nn.Linear(input_dim, hid_dim))
         for _ in range(num_layers_encoder - 1):
             self.encoder.append(nn.Linear(hid_dim, hid_dim))
-        # 解码器
         self.decoder = nn.ModuleList()
         for _ in range(num_layers_decoder - 1):
             self.decoder.append(nn.Linear(hid_dim, hid_dim))
